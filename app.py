@@ -93,6 +93,7 @@ def update_user_searches(user_id, new_count):
         cursor.execute('UPDATE users SET remaining_searches = ? WHERE user_id = ?', (new_count, user_id))
         conn.commit()
         conn.close()
+        logger.info(f"✅ Kullanıcı {user_id} sorgu hakkı güncellendi: {new_count}")
     except Exception as e:
         logger.error(f"❌ update_user_searches hatası: {e}")
 
@@ -109,6 +110,8 @@ def add_invite(user_id):
             bonus_received = bool(result[1])
             new_invites = current_invites + 1
             
+            logger.info(f"📨 Davet ekleniyor: {user_id} -> {current_invites} -> {new_invites}")
+            
             cursor.execute('UPDATE users SET invited_users = ?, total_invites = total_invites + 1 WHERE user_id = ?', 
                           (new_invites, user_id))
             
@@ -121,10 +124,12 @@ def add_invite(user_id):
                               (new_searches, user_id))
                 conn.commit()
                 conn.close()
+                logger.info(f"🎉 Kullanıcı {user_id} 30 sorgu hakkı bonusu kazandı! Yeni hak: {new_searches}")
                 return True
             
             conn.commit()
             conn.close()
+            logger.info(f"✅ Kullanıcı {user_id} davet sayısı güncellendi: {new_invites}")
         
         return False
         
@@ -132,46 +137,40 @@ def add_invite(user_id):
         logger.error(f"❌ add_invite hatası: {e}")
         return False
 
-# Google Drive'dan JSON indirme
-def get_drive_link_from_github():
-    try:
-        github_raw_url = "https://raw.githubusercontent.com/KULLANICI_ADI/REPO_ADI/main/drive_link.txt"
-        response = requests.get(github_raw_url)
-        if response.status_code == 200:
-            return response.text.strip()
-        else:
-            # Fallback: direkt link
-            return "https://drive.google.com/uc?id=1dIkedxpzP7GSPDPbkGAise-WhZ3oTwJ0"
-    except Exception as e:
-        logger.error(f"GitHub bağlantı hatası: {e}")
-        return "https://drive.google.com/uc?id=1dIkedxpzP7GSPDPbkGAise-WhZ3oTwJ0"
-
+# Google Drive'dan JSON indirme - GÜNCELLENMİŞ
 def download_json_file():
     json_path = "sicil.json"
     
-    # Eğer dosya varsa ve 1 saatten eski değilse yeniden indirme
+    # Önce mevcut dosyayı sil (cache problemi)
     if os.path.exists(json_path):
-        file_time = os.path.getmtime(json_path)
-        current_time = os.path.getmtime(__file__)  # Bu dosyanın zamanı
-        if (current_time - file_time) < 3600:  # 1 saat
-            logger.info("✅ JSON dosyası zaten güncel")
-            return True
+        os.remove(json_path)
+        logger.info("🗑️ Eski JSON dosyası silindi")
     
     try:
-        drive_url = get_drive_link_from_github()
-        logger.info(f"📥 Drive'dan indiriliyor: {drive_url}")
+        # DIRECT Google Drive link
+        drive_url = "https://drive.google.com/uc?id=1dIkedxpzP7GSPDPbkGAise-WhZ3oTwJ0"
+        logger.info(f"📥 DIRECT Drive indirme: {drive_url}")
         
+        # gdown ile indir
         gdown.download(drive_url, json_path, quiet=False)
         
-        if os.path.exists(json_path) and os.path.getsize(json_path) > 0:
-            logger.info("✅ JSON dosyası başarıyla indirildi")
-            return True
+        # Kontrol et
+        if os.path.exists(json_path):
+            file_size = os.path.getsize(json_path)
+            logger.info(f"✅ JSON indirildi! Boyut: {file_size} bytes")
+            
+            if file_size > 0:
+                return True
+            else:
+                logger.error("❌ Dosya boş!")
+                return False
         else:
-            logger.error("❌ İndirilen dosya boş veya hatalı")
+            logger.error("❌ Dosya oluşturulamadı!")
             return False
             
     except Exception as e:
-        logger.error(f"❌ İndirme hatası: {e}")
+        logger.error(f"🚨 İndirme hatası: {str(e)}")
+        logger.error(f"🚨 Traceback: {traceback.format_exc()}")
         return False
 
 def search_by_tc(tc):
@@ -219,20 +218,39 @@ def search_by_tc(tc):
 # Flask routes
 @app.route('/')
 def home():
+    json_loaded = os.path.exists('sicil.json')
     return jsonify({
         "status": "active", 
         "message": "Sicil Sorgulama Bot API",
-        "json_loaded": os.path.exists('sicil.json')
+        "json_loaded": json_loaded
     })
 
 @app.route('/health')
 def health():
-    json_status = download_json_file()
+    json_status = download_json_file()  # Zorunlu indirme
+    file_size = os.path.getsize('sicil.json') if json_status else 0
+    
     return jsonify({
-        "status": "healthy",
+        "status": "healthy" if json_status else "error",
         "json_downloaded": json_status,
-        "json_size": os.path.getsize('sicil.json') if json_status else 0
+        "json_size": file_size,
+        "drive_url": "https://drive.google.com/uc?id=1dIkedxpzP7GSPDPbkGAise-WhZ3oTwJ0"
     })
+
+@app.route('/test-drive')
+def test_drive():
+    """Google Drive bağlantı testi"""
+    try:
+        test_url = "https://drive.google.com/uc?id=1dIkedxpzP7GSPDPbkGAise-WhZ3oTwJ0"
+        response = requests.get(test_url, stream=True)
+        
+        return jsonify({
+            "status_code": response.status_code,
+            "content_type": response.headers.get('content-type', ''),
+            "content_length": response.headers.get('content-length', '0')
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 # Telegram Bot
 def run_telegram_bot():
@@ -258,14 +276,23 @@ def run_telegram_bot():
         async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = update.effective_user.id
             
+            # Referans işlemi
             if context.args:
                 try:
                     referrer_id = int(context.args[0])
                     if referrer_id != user_id:
-                        add_invite(referrer_id)
+                        bonus_verildi = add_invite(referrer_id)
+                        if bonus_verildi:
+                            await context.bot.send_message(
+                                referrer_id,
+                                "🎉 **TEBRİKLER! 3 KİŞİ DAVET ETTİNİZ!**\n\n"
+                                "✅ **30 SORGU HAKKI** kazandınız!\n\n"
+                                "@nabisystem @watronschecker"
+                            )
                 except ValueError:
                     pass
             
+            # Kanal kontrolü
             missing_channels = await check_channel_membership(update, context)
             
             if missing_channels:
@@ -276,86 +303,142 @@ def run_telegram_bot():
                 reply_markup = InlineKeyboardMarkup(buttons)
                 
                 await update.message.reply_text(
-                    "❌ Kanallara katılın!",
+                    "❌ **Kanal Üyeliği Gerekli**\n\n"
+                    "Botu kullanmak için aşağıdaki kanallara katılmanız gerekiyor:\n\n" +
+                    "\n".join([f"• {channel}" for channel in missing_channels]) +
+                    "\n\nKanallara katıldıktan sonra '✅ Kontrol Et' butonuna tıklayın.",
                     reply_markup=reply_markup
                 )
                 return
             
+            # Ana menü
             user_data = get_user_data(user_id)
             await update.message.reply_text(
                 f"🔍 **Sicil Sorgulama Botu**\n\n"
-                f"**Kalan Hak:** {user_data['remaining_searches']}\n"
-                f"**Davet:** {user_data['invited_users']}/3\n"
-                f"**Bonus:** {'✅ Alındı' if user_data['bonus_received'] else '❌ Bekliyor'}\n\n"
-                "**Komutlar:**\n• `/sicil 12345678901`\n• `/referans`\n\n"
-                "🎉 **3 davet = 30 SORGU HAKKI!**"
+                f"**Kalan Sorgu Hakkı:** {user_data['remaining_searches']}\n"
+                f"**Davet Edilen:** {user_data['invited_users']}/3 kişi\n"
+                f"**Toplam Davet:** {user_data['total_invites']} kişi\n"
+                f"**Bonus Durumu:** {'✅ 30 HAK KAZANILDI' if user_data['bonus_received'] else '❌ 30 HAK BEKLİYOR'}\n\n"
+                "**Komutlar:**\n"
+                "• `/sicil 12345678901` - TC sorgula\n"
+                "• `/referans` - Davet linkini al\n\n"
+                "🎉 **3 arkadaşını davet et, 30 SORGU HAKKI kazan!**\n\n"
+                "@nabisystem @watronschecker"
             )
 
         async def sicil_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = update.effective_user.id
             
+            # Kanal kontrolü
             missing_channels = await check_channel_membership(update, context)
             if missing_channels:
-                await update.message.reply_text("❌ Önce kanallara katılın! /start")
+                await update.message.reply_text("❌ Önce tüm kanallara katılmalısınız! /start")
                 return
             
             user_data = get_user_data(user_id)
             
             if user_data['remaining_searches'] <= 0:
-                await update.message.reply_text("❌ Hak kalmadı! /referans")
+                await update.message.reply_text(
+                    "❌ **Sorgu hakkınız kalmadı!**\n\n"
+                    "Yeni hak kazanmak için 3 arkadaşınızı davet edin:\n"
+                    "`/referans`\n\n"
+                    "🎉 **3 davet = 30 SORGU HAKKI!**\n\n"
+                    "@nabisystem @watronschecker"
+                )
                 return
             
             if not context.args:
-                await update.message.reply_text("❌ Kullanım: /sicil 12345678901")
+                await update.message.reply_text("❌ **Doğru kullanım:** `/sicil 12345678901`")
                 return
             
             tc = context.args[0]
+            
             if not tc.isdigit() or len(tc) != 11:
-                await update.message.reply_text("❌ Geçersiz TC!")
+                await update.message.reply_text("❌ Geçersiz TC kimlik numarası! 11 haneli numara girin.")
                 return
             
+            # Hak sayısını güncelle
             update_user_searches(user_id, user_data['remaining_searches'] - 1)
-            await update.message.reply_text("🔍 Aranıyor...")
             
+            await update.message.reply_text("🔍 Sicil kayıtları aranıyor... @nabisystem @watronschecker")
+            
+            # Arama yap
             sonuclar = search_by_tc(tc)
             
             if isinstance(sonuclar, str):
-                await update.message.reply_text(f"❌ {sonuclar}")
+                await update.message.reply_text(f"❌ {sonuclar}\n\n@nabisystem @watronschecker")
                 return
             
             if not sonuclar:
-                await update.message.reply_text(f"❌ {tc} bulunamadı")
+                await update.message.reply_text(f"❌ **{tc}** numarasına ait sicil kaydı bulunamadı.\n\n@nabisystem @watronschecker")
                 return
             
+            # Sonuçları göster (ilk 3 kayıt)
             for i, kayit in enumerate(sonuclar[:3]):
                 mesaj = f"**Kayıt {i+1}:**\n"
                 
                 if kayit.get('KISI_TC_KIMLIK_NO') == tc:
                     mesaj += f"👤 **Müvekkil:** {kayit.get('KISI_ADI', '')} {kayit.get('KISI_SOYAD', '')}\n"
                     mesaj += f"⚖️ **Suç:** {kayit.get('KISI_SUC_ADI', '')}\n"
+                    mesaj += f"🎭 **Tip:** {kayit.get('KISI_TIP_ADI', '')}\n"
                 else:
                     mesaj += f"⚖️ **Avukat:** {kayit.get('AVUKAT_ADI', '')} {kayit.get('AVUKAT_SOYADI', '')}\n"
+                    mesaj += f"🔢 **Sicil No:** {kayit.get('AVUKAT_SICIL_NO', '')}\n"
                 
                 mesaj += f"📁 **Dosya:** {kayit.get('DOSYA_NO', '')}\n"
                 mesaj += f"🏛️ **Kurum:** {kayit.get('KURUM_ADI', '')}\n"
+                mesaj += f"📅 **Tarih:** {kayit.get('GOREV_TARIHI', '')[:10]}\n\n"
+                mesaj += "@nabisystem @watronschecker"
+                
                 await update.message.reply_text(mesaj)
             
+            # Kalan hakları göster
             user_data = get_user_data(user_id)
-            await update.message.reply_text(f"✅ Tamamlandı! Kalan Hak: {user_data['remaining_searches']}")
+            await update.message.reply_text(
+                f"✅ **Arama tamamlandı!**\n"
+                f"**Kalan Sorgu Hakkı:** {user_data['remaining_searches']}\n"
+                f"**Bulunan Kayıt:** {len(sonuclar)} adet\n\n"
+                "@nabisystem @watronschecker"
+            )
 
         async def referans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = update.effective_user.id
+            
+            # Kanal kontrolü
+            missing_channels = await check_channel_membership(update, context)
+            if missing_channels:
+                await update.message.reply_text("❌ Önce tüm kanallara katılmalısınız! /start")
+                return
+            
             user_data = get_user_data(user_id)
             
             bot_username = (await context.bot.get_me()).username
             invite_link = f"https://t.me/{bot_username}?start={user_id}"
             
+            # Davet durumuna göre mesaj
+            if user_data['bonus_received']:
+                bonus_text = "✅ **30 SORGU HAKKI ZATEN KAZANILDI!**"
+                info_text = "🎉 Bonusu zaten aldınız! Yeni davetler için teşekkürler."
+            elif user_data['invited_users'] >= 3:
+                bonus_text = "✅ **30 SORGU HAKKI HAK EDİLDİ!**"
+                info_text = "🎉 3 kişi davet ettiniz! Bonus otomatik olarak eklendi."
+            else:
+                kalan = 3 - user_data['invited_users']
+                bonus_text = f"❌ **{kalan} kişi kaldı!**"
+                info_text = f"🔥 {kalan} kişi daha davet ederek 30 SORGU HAKKI kazan!"
+            
             await update.message.reply_text(
-                f"📨 **Referans Sistemi**\n\n"
-                f"**Davet:** {user_data['invited_users']}/3 kişi\n"
-                f"**Bonus:** {'✅ 30 HAK ALINDI' if user_data['bonus_received'] else '❌ 30 HAK BEKLİYOR'}\n\n"
-                f"**Link:** `{invite_link}`\n\n"
-                "🔥 **3 kişi davet et, 30 HAK kazan!**"
+                f"📨 **REFERANS SİSTEMİ**\n\n"
+                f"**Davet Durumu:** {user_data['invited_users']}/3 kişi\n"
+                f"**Toplam Davet:** {user_data['total_invites']} kişi\n"
+                f"**Bonus:** {bonus_text}\n\n"
+                f"{info_text}\n\n"
+                f"**Davet Linkiniz:**\n`{invite_link}`\n\n"
+                "📍 **Nasıl Çalışır?**\n"
+                "1. Linki arkadaşlarınıza gönderin\n"
+                "2. Onlar botu kullanmaya başlasın\n"
+                "3. 3 kişi tamamlayınca 30 HAK kazanın!\n\n"
+                "@nabisystem @watronschecker"
             )
 
         async def check_membership_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -365,10 +448,10 @@ def run_telegram_bot():
             missing_channels = await check_channel_membership(update, context)
             
             if not missing_channels:
-                await query.edit_message_text("✅ Kanallara katılım onaylandı!")
+                await query.edit_message_text("✅ **Tüm kanallara katılım onaylandı!**\n\nBotu kullanmaya başlayabilirsiniz.")
                 await start_command(update, context)
             else:
-                await query.edit_message_text("❌ Hala katılmadınız! /start")
+                await query.edit_message_text("❌ **Hala kanallara katılmadınız!** Lütfen /start komutu ile tekrar deneyin.")
 
         # Handlers
         application.add_handler(CommandHandler("start", start_command))
